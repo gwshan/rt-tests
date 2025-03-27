@@ -201,6 +201,7 @@ struct global {
 	/* The core that we run the main thread.  Default is cpu0 */
 	int                   cpu_main_thread;
 	char                  *cpu_list;
+	char                  *resctrl_group;
 	char                  *app_name;
 	struct workload       *workload;
 	uint64_t              workload_mem_size;
@@ -612,6 +613,7 @@ static void usage(int error)
 	       "-B, --bias             Add a bias to all the buckets using the estimated mininum\n"
 	       "-c, --cpu-list         Specify CPUs to run on, e.g. '1,3,5,7-15'\n"
 	       "-C, --cpu-main-thread  Specify which CPU the main thread runs on.  Default is cpu0.\n"
+	       "-g, --resctrl-group    Specify resctrl group where all threads are associated.\n"
 	       "-D, --duration         Specify test duration, e.g., 60, 20m, 2H\n"
 	       "                       (m/M: minutes, h/H: hours, d/D: days)\n"
 	       "    --json=FILENAME    write final results into FILENAME, JSON formatted\n"
@@ -655,10 +657,9 @@ static int workload_select(char *name)
 
 enum option_value {
 	OPT_BUCKETSIZE = 1, OPT_BUCKETWIDTH, OPT_CPU_LIST, OPT_CPU_MAIN_THREAD,
-	OPT_DURATION, OPT_JSON, OPT_RT_PRIO, OPT_HELP, OPT_TRACE_TH,
-	OPT_WORKLOAD, OPT_WORKLOAD_MEM, OPT_BIAS,
-	OPT_QUIET, OPT_SINGLE_PREHEAT, OPT_ZERO_OMIT,
-	OPT_VERSION
+	OPT_RESCTRL_GROUP, OPT_DURATION, OPT_JSON, OPT_RT_PRIO, OPT_HELP,
+	OPT_TRACE_TH, OPT_WORKLOAD, OPT_WORKLOAD_MEM, OPT_BIAS, OPT_QUIET,
+	OPT_SINGLE_PREHEAT, OPT_ZERO_OMIT, OPT_VERSION
 };
 
 /* Process commandline options */
@@ -671,6 +672,7 @@ static void parse_options(int argc, char *argv[])
 			{ "bucket-width", required_argument,	NULL, OPT_BUCKETWIDTH },
 			{ "cpu-list",	required_argument,	NULL, OPT_CPU_LIST },
 			{ "cpu-main-thread", required_argument, NULL, OPT_CPU_MAIN_THREAD},
+			{ "resctrl-group", required_argument, NULL, OPT_RESCTRL_GROUP },
 			{ "duration",	required_argument,	NULL, OPT_DURATION },
 			{ "json",	required_argument,      NULL, OPT_JSON },
 			{ "rtprio",	required_argument,	NULL, OPT_RT_PRIO },
@@ -685,7 +687,7 @@ static void parse_options(int argc, char *argv[])
 			{ "version",	no_argument,		NULL, OPT_VERSION },
 			{ NULL, 0, NULL, 0 },
 		};
-		int i, c = getopt_long(argc, argv, "b:Bc:C:D:f:hm:qsw:W:T:vz",
+		int i, c = getopt_long(argc, argv, "b:Bc:C:g:D:f:hm:qsw:W:T:vz",
 				       options, &option_index);
 		long ncores;
 
@@ -734,6 +736,10 @@ static void parse_options(int argc, char *argv[])
 				       optarg, ncores);
 				exit(1);
 			}
+			break;
+		case OPT_RESCTRL_GROUP:
+		case 'g':
+			g.resctrl_group = strdup(optarg);
 			break;
 		case OPT_DURATION:
 		case 'D':
@@ -821,6 +827,36 @@ static void parse_options(int argc, char *argv[])
 		g.bucket_size = BUCKET_SIZE * 1000 / g.bucket_width;
 }
 
+static int attach_resctrl_group(void)
+{
+	FILE *f;
+	char path[1024], str[64];
+	int ret;
+
+	if (!g.resctrl_group)
+		return 0;
+
+	memset(path, 0, sizeof(path));
+	snprintf(path, sizeof(path), "/sys/fs/resctrl/%s/tasks", g.resctrl_group);
+	        f = fopen(path, "w");
+        if (!f) {
+		fprintf(stderr, "Resctrl group <%s> doesn't exist\n", g.resctrl_group);
+		return -EINVAL;
+	}
+
+	memset(str, 0, sizeof(str));
+	snprintf(str, sizeof(str), "%d", getpid());
+	ret = fputs(str, f);
+	if (ret < 0) {
+		fprintf(stderr, "Unable to write <%s>\n", path);
+		fclose(f);
+		return -EIO;
+	}
+
+	fclose(f);
+	return 0;
+}
+
 void dump_globals(void)
 {
 	printf("Total runtime: \t\t%d seconds\n", g.runtime);
@@ -889,6 +925,9 @@ int main(int argc, char *argv[])
 	g.cpu_main_thread = 0;
 	printf("oslat V %1.2f\n", VERSION);
 	parse_options(argc, argv);
+
+	if (attach_resctrl_group())
+		fatal("oslat: Unable to attach resctrl group.\n");
 
 	TEST(mlockall(MCL_CURRENT | MCL_FUTURE) == 0);
 

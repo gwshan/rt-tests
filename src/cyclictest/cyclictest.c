@@ -227,6 +227,7 @@ static int latency_target_fd = -1;
 static int32_t latency_target_value = 0;
 
 static int deepest_idle_state = -2;
+static char *resctrl_group = NULL;
 
 static int rstat_ftruncate(int fd, off_t len);
 static int rstat_fd = -1;
@@ -1007,7 +1008,8 @@ static void display_help(int error)
 	       "-v       --verbose         output values on stdout for statistics\n"
 	       "                           format: n:c:v n=tasknum c=count v=value in us\n"
 	       "	 --dbg_cyclictest  print info useful for debugging cyclictest\n"
-	       "-x	 --posix_timers    use POSIX timers instead of clock_nanosleep.\n"
+	       "-x	 --posix_timers    use POSIX timers instead of clock_nanosleep\n"
+	       "         --resctrl_group   the target resctrl group.\n"
 		);
 	if (error)
 		exit(EXIT_FAILURE);
@@ -1088,6 +1090,7 @@ enum option_values {
 	OPT_DBGCYCLIC, OPT_POLICY, OPT_HELP, OPT_NUMOPTS,
 	OPT_ALIGNED, OPT_SECALIGNED, OPT_LAPTOP, OPT_SMI,
 	OPT_TRACEMARK, OPT_POSIX_TIMERS, OPT_DEEPEST_IDLE_STATE,
+	OPT_RESCTRL_GROUP,
 };
 
 /* Process commandline options */
@@ -1144,6 +1147,7 @@ static void process_options(int argc, char *argv[], int max_cpus)
 			{"help",             no_argument,       NULL, OPT_HELP },
 			{"posix_timers",     no_argument,	NULL, OPT_POSIX_TIMERS },
 			{"deepest-idle-state", required_argument,	NULL, OPT_DEEPEST_IDLE_STATE },
+			{"resctrl-group",    required_argument, NULL, OPT_RESCTRL_GROUP },
 			{NULL, 0, NULL, 0 },
 		};
 		int c = getopt_long(argc, argv, "a::A::b:c:d:D:F:h:H:i:l:MNo:p:mqrRsSt::uvD:x",
@@ -1346,6 +1350,9 @@ static void process_options(int argc, char *argv[], int max_cpus)
 			trace_marker = 1; break;
 		case OPT_DEEPEST_IDLE_STATE:
 			deepest_idle_state = atoi(optarg);
+			break;
+		case OPT_RESCTRL_GROUP:
+			resctrl_group = optarg;
 			break;
 		}
 	}
@@ -1908,6 +1915,9 @@ static void set_main_thread_affinity(struct bitmask *cpumask)
 
 int main(int argc, char **argv)
 {
+	FILE *fp;
+	char buf[20];
+	size_t size;
 	sigset_t sigset;
 	int signum = SIGALRM;
 	int mode;
@@ -1916,6 +1926,7 @@ int main(int argc, char **argv)
 	int online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 	int i, ret = -1;
 	int status;
+	char path[PATH_MAX];
 
 	rt_init(argc, argv);
 	process_options(argc, argv, max_cpus);
@@ -1926,6 +1937,29 @@ int main(int argc, char **argv)
 	if (verbose) {
 		printf("Max CPUs = %d\n", max_cpus);
 		printf("Online CPUs = %d\n", online_cpus);
+	}
+
+	/* Link to the specified resctrl group */
+	if (resctrl_group) {
+		memset(path, 0, PATH_MAX);
+		snprintf(path, PATH_MAX, "/sys/fs/resctrl/%s/tasks", resctrl_group);
+		fp = fopen(path, "w");
+		if (!fp) {
+			fprintf(stderr, "Resctrl group <%s> doesn't exist\n", resctrl_group);
+			exit(EXIT_FAILURE);
+		}
+
+		memset(buf, 0, sizeof(buf));
+		snprintf(buf, sizeof(buf), "%d", getpid());
+		size = fwrite(buf, sizeof(*buf), strlen(buf), fp);
+		if (size != strlen(buf)) {
+			fprintf(stderr, "Unable to link to resctrl group <%s>\n",
+				resctrl_group);
+			fclose(fp);
+			exit(EXIT_FAILURE);
+		}
+
+		fclose(fp);
 	}
 
 	if (affinity_mask != NULL) {
